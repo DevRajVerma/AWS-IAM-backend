@@ -1,21 +1,24 @@
 const mongoose = require("mongoose");
-
 const User = require("../models/User");
 
 exports.getUsers = async (req, res) => {
   try {
-    const users = await User.find().select("-password");
+    const users = await User.find().select("-password").sort({ createdAt: -1 });
 
     const formattedUsers = users.map((user) => ({
-      id: user._id,
+      _id: user._id,
       name: user.name,
       email: user.email,
       role: user.role,
+      status: user.status,
       lastLogin: user.lastLogin,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
     }));
 
     res.status(200).json(formattedUsers);
   } catch (error) {
+    console.error("Error fetching users:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
@@ -23,7 +26,6 @@ exports.getUsers = async (req, res) => {
 // @desc    Get user by ID
 // @route   GET /api/users/:id
 // @access  Private/Admin
-
 exports.getUserById = async (req, res) => {
   try {
     const user = await User.findById(req.params.id).select("-password");
@@ -33,16 +35,19 @@ exports.getUserById = async (req, res) => {
     }
 
     const formattedUser = {
-      id: user._id,
+      _id: user._id,
       name: user.name,
       email: user.email,
       role: user.role,
       status: user.status,
-      lastLogin: user.lastLoginFormatted,
+      lastLogin: user.lastLogin,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
     };
 
     res.status(200).json(formattedUser);
   } catch (error) {
+    console.error("Error fetching user by ID:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
@@ -54,39 +59,43 @@ exports.createUser = async (req, res) => {
   try {
     const { name, email, role, status, password } = req.body;
 
-    //Check if user already exists
-    const userExists = await User.findOne({ email });
+    // Validate required fields
+    if (!name || !email) {
+      return res.status(400).json({ message: "Name and email are required" });
+    }
+
+    // Check if user already exists
+    const userExists = await User.findOne({ email: email.toLowerCase() });
 
     if (userExists) {
       return res.status(400).json({ message: "User already exists" });
     }
 
-    //Create temporary password if not provided
-    const userPassword = password || "tempPassword123";
+    // Create temporary password if not provided
+    const userPassword = password || "TempPass123!";
 
     const user = await User.create({
-      name,
-      email,
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
       password: userPassword,
-      role,
-      status,
+      role: role || "readOnly",
+      status: status || "pending",
     });
 
-    if (user) {
-      const formattedUser = {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        status: user.status,
-        lastLogin: user.lastLoginFormatted,
-      };
+    const formattedUser = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+      lastLogin: user.lastLogin,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    };
 
-      res.status(201).json(formattedUser);
-    } else {
-      res.status(400).json({ message: "Invalid user data" });
-    }
+    res.status(201).json(formattedUser);
   } catch (error) {
+    console.error("Error creating user:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
@@ -100,19 +109,29 @@ exports.updateUser = async (req, res) => {
 
     const user = await User.findById(req.params.id);
 
-    console.log("Found user to update:", user);
-
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    //Update user fields
-    user.name = name || user.name;
-    user.email = email || user.email;
-    user.role = role || user.role;
-    user.status = status || user.status;
+    // Check if email is being changed and if it already exists
+    if (email && email.toLowerCase() !== user.email) {
+      const emailExists = await User.findOne({ 
+        email: email.toLowerCase(),
+        _id: { $ne: user._id } 
+      });
+      
+      if (emailExists) {
+        return res.status(400).json({ message: "Email already exists" });
+      }
+    }
 
-    //only update password if provided
+    // Update user fields
+    if (name) user.name = name.trim();
+    if (email) user.email = email.toLowerCase().trim();
+    if (role) user.role = role;
+    if (status) user.status = status;
+
+    // Only update password if provided
     if (password) {
       user.password = password;
     }
@@ -120,16 +139,19 @@ exports.updateUser = async (req, res) => {
     const updatedUser = await user.save();
 
     const formattedUser = {
-      id: updatedUser._id,
+      _id: updatedUser._id,
       name: updatedUser.name,
       email: updatedUser.email,
       role: updatedUser.role,
       status: updatedUser.status,
-      lastLogin: updatedUser.lastLoginFormatted || updatedUser.lastLogin,
+      lastLogin: updatedUser.lastLogin,
+      createdAt: updatedUser.createdAt,
+      updatedAt: updatedUser.updatedAt,
     };
 
     res.status(200).json(formattedUser);
   } catch (error) {
+    console.error("Error updating user:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
@@ -145,10 +167,19 @@ exports.deleteUser = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    await user.deleteOne();
+    // Prevent deleting self (if needed)
+    if (req.user && req.user._id.toString() === req.params.id) {
+      return res.status(400).json({ message: "Cannot delete your own account" });
+    }
 
-    res.status(200).json({ message: "User removed", id: req.params.id });
+    await User.findByIdAndDelete(req.params.id);
+
+    res.status(200).json({ 
+      message: "User removed successfully", 
+      _id: req.params.id 
+    });
   } catch (error) {
+    console.error("Error deleting user:", error);
     res.status(500).json({ message: "Server Error", error: error.message });
   }
 };
@@ -164,12 +195,25 @@ exports.updateLastLogin = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    user.lastLogin = Date.now();
+    const options = {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    };
 
+    user.lastLogin = new Date().toLocaleString("en-IN", options);
     await user.save();
 
-    res.status(200).json({ message: "Last login updated" });
+    res.status(200).json({ 
+      message: "Last login updated",
+      lastLogin: user.lastLogin 
+    });
   } catch (error) {
+    console.error("Error updating last login:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };

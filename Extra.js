@@ -1,557 +1,361 @@
-// models/User.js
-const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
+const { User, Organization, Invitation, Session, AuditLog } = require('./schemas');
+const crypto = require('crypto');
+const bcrypt = require('bcrypt');
 
-const userSchema = new mongoose.Schema(
-  {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    email: {
-      type: String,
-      required: true,
-      unique: true,
-      trim: true,
-      lowercase: true,
-    },
-    password: {
-      type: String,
-      required: true,
-    },
-    role: {
-      type: String,
-      enum: ["readOnly", "s3Uploader", "ec2Manager", "admin"],
-      default: "readOnly",
-    },
-    status: {
-      type: String,
-      enum: ["active", "inactive", "pending"],
-      default: "pending",
-    },
-    lastLogin: {
-      type: Date,
-      default: null,
-    },
-  },
-  { timestamps: true }
-);
-
-// Hash password before saving
-userSchema.pre("save", async function (next) {
-  if (!this.isModified("password")) {
-    return next();
-  }
-  
-  try {
-    const salt = await bcrypt.genSalt(10);
-    this.password = await bcrypt.hash(this.password, salt);
-    next();
-  } catch (error) {
-    next(error);
-  }
-});
-
-// Method to check password
-userSchema.methods.matchPassword = async function (enteredPassword) {
-  return await bcrypt.compare(enteredPassword, this.password);
-};
-
-// Virtual to format lastLogin for frontend
-userSchema.virtual("lastLoginFormatted").get(function () {
-  if (!this.lastLogin) return "Never";
-  return this.lastLogin.toISOString().split("T")[0];
-});
-
-// Ensure virtuals are included in JSON output
-userSchema.set("toJSON", { virtuals: true });
-userSchema.set("toObject", { virtuals: true });
-
-const User = mongoose.model("User", userSchema);
-
-module.exports = User;
-
-// controllers/userController.js
-const User = require("../models/User");
-
-// @desc    Get all users
-// @route   GET /api/users
-// @access  Private/Admin
-exports.getUsers = async (req, res) => {
-  try {
-    const users = await User.find().select("-password");
+class AuthService {
+  // Create Organization (Owner Registration)
+  async createOrganization(userData, orgData) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     
-    // Format users to match frontend expectations
-    const formattedUsers = users.map(user => ({
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      status: user.status,
-      lastLogin: user.lastLoginFormatted
-    }));
-    
-    res.status(200).json(formattedUsers);
-  } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
-
-// @desc    Get user by ID
-// @route   GET /api/users/:id
-// @access  Private/Admin
-exports.getUserById = async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id).select("-password");
-    
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-    
-    const formattedUser = {
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      status: user.status,
-      lastLogin: user.lastLoginFormatted
-    };
-    
-    res.status(200).json(formattedUser);
-  } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
-
-// @desc    Create a new user
-// @route   POST /api/users
-// @access  Private/Admin
-exports.createUser = async (req, res) => {
-  try {
-    const { name, email, role, status, password } = req.body;
-    
-    // Check if user already exists
-    const userExists = await User.findOne({ email });
-    
-    if (userExists) {
-      return res.status(400).json({ message: "User already exists" });
-    }
-    
-    // Create temporary password if not provided
-    const userPassword = password || "tempPassword123";
-    
-    const user = await User.create({
-      name,
-      email,
-      password: userPassword,
-      role,
-      status
-    });
-    
-    if (user) {
-      const formattedUser = {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        status: user.status,
-        lastLogin: user.lastLoginFormatted
-      };
-      
-      res.status(201).json(formattedUser);
-    } else {
-      res.status(400).json({ message: "Invalid user data" });
-    }
-  } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
-
-// @desc    Update user
-// @route   PUT /api/users/:id
-// @access  Private/Admin
-exports.updateUser = async (req, res) => {
-  try {
-    const { name, email, role, status, password } = req.body;
-    
-    const user = await User.findById(req.params.id);
-    
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-    
-    // Update user fields
-    user.name = name || user.name;
-    user.email = email || user.email;
-    user.role = role || user.role;
-    user.status = status || user.status;
-    
-    // Only update password if provided
-    if (password) {
-      user.password = password;
-    }
-    
-    const updatedUser = await user.save();
-    
-    const formattedUser = {
-      id: updatedUser._id,
-      name: updatedUser.name,
-      email: updatedUser.email,
-      role: updatedUser.role,
-      status: updatedUser.status,
-      lastLogin: updatedUser.lastLoginFormatted
-    };
-    
-    res.status(200).json(formattedUser);
-  } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
-
-// @desc    Delete user
-// @route   DELETE /api/users/:id
-// @access  Private/Admin
-exports.deleteUser = async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id);
-    
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-    
-    await user.deleteOne();
-    
-    res.status(200).json({ message: "User removed", id: req.params.id });
-  } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
-
-// @desc    Update user's last login
-// @route   PUT /api/users/:id/login
-// @access  Private
-exports.updateLastLogin = async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id);
-    
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-    
-    user.lastLogin = Date.now();
-    await user.save();
-    
-    res.status(200).json({ message: "Last login updated" });
-  } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
-
-// routes/userRoutes.js
-const express = require("express");
-const router = express.Router();
-const { 
-  getUsers, 
-  getUserById, 
-  createUser, 
-  updateUser, 
-  deleteUser, 
-  updateLastLogin 
-} = require("../controllers/userController");
-const { protect, admin } = require("../middleware/authMiddleware");
-
-// Get all users
-router.get("/", protect, admin, getUsers);
-
-// Get user by ID
-router.get("/:id", protect, admin, getUserById);
-
-// Create a new user
-router.post("/", protect, admin, createUser);
-
-// Update user
-router.put("/:id", protect, admin, updateUser);
-
-// Delete user
-router.delete("/:id", protect, admin, deleteUser);
-
-// Update last login
-router.put("/:id/login", protect, updateLastLogin);
-
-module.exports = router;
-
-// middleware/authMiddleware.js
-const jwt = require("jsonwebtoken");
-const User = require("../models/User");
-
-// Protect routes
-exports.protect = async (req, res, next) => {
-  let token;
-  
-  // Check if token exists in header
-  if (req.headers.authorization && req.headers.authorization.startsWith("Bearer")) {
     try {
-      // Get token from header
-      token = req.headers.authorization.split(" ")[1];
+      // Create user
+      const hashedPassword = await bcrypt.hash(userData.password, 12);
+      const user = new User({
+        email: userData.email,
+        firstName: userData.firstName,
+        lastName: userData.lastName,
+        passwordHash: hashedPassword,
+        emailVerified: userData.emailVerified || false
+      });
       
-      // Verify token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      await user.save({ session });
       
-      // Get user from token
-      req.user = await User.findById(decoded.id).select("-password");
+      // Create organization
+      const organization = new Organization({
+        name: orgData.name,
+        description: orgData.description,
+        slug: orgData.slug,
+        ownerId: user._id,
+        members: [{
+          userId: user._id,
+          role: 'owner',
+          joinedAt: new Date(),
+          status: 'active'
+        }]
+      });
       
-      next();
+      await organization.save({ session });
+      
+      // Update user with organization reference
+      user.organizations.push({
+        organizationId: organization._id,
+        role: 'owner',
+        joinedAt: new Date(),
+        status: 'active'
+      });
+      
+      await user.save({ session });
+      
+      await session.commitTransaction();
+      return { user, organization };
+      
     } catch (error) {
-      res.status(401).json({ message: "Not authorized, token failed" });
+      await session.abortTransaction();
+      throw error;
+    } finally {
+      session.endSession();
     }
   }
   
-  if (!token) {
-    res.status(401).json({ message: "Not authorized, no token" });
-  }
-};
-
-// Admin middleware
-exports.admin = (req, res, next) => {
-  if (req.user && req.user.role === "admin") {
-    next();
-  } else {
-    res.status(401).json({ message: "Not authorized as an admin" });
-  }
-};
-
-// controllers/authController.js
-const User = require("../models/User");
-const jwt = require("jsonwebtoken");
-
-// Generate JWT
-const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: "30d",
-  });
-};
-
-// @desc    Auth user & get token
-// @route   POST /api/auth/login
-// @access  Public
-exports.login = async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    
-    // Check for user
-    const user = await User.findOne({ email });
-    
-    if (!user) {
-      return res.status(401).json({ message: "Invalid email or password" });
-    }
-    
-    // Check if password matches
-    const isMatch = await user.matchPassword(password);
-    
-    if (!isMatch) {
-      return res.status(401).json({ message: "Invalid email or password" });
-    }
-    
-    // Check if user is active
-    if (user.status !== "active") {
-      return res.status(401).json({ message: "Account is not active" });
-    }
-    
-    // Update last login
-    user.lastLogin = Date.now();
-    await user.save();
-    
-    res.status(200).json({
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      status: user.status,
-      token: generateToken(user._id),
-    });
-  } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
-
-// @desc    Register a new user
-// @route   POST /api/auth/register
-// @access  Public
-exports.register = async (req, res) => {
-  try {
-    const { name, email, password } = req.body;
-    
+  // Send Invitation
+  async sendInvitation(organizationId, inviterUserId, email, role, permissions = new Map()) {
     // Check if user already exists
-    const userExists = await User.findOne({ email });
-    
-    if (userExists) {
-      return res.status(400).json({ message: "User already exists" });
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      // Check if already a member
+      const isMember = existingUser.organizations.some(org => 
+        org.organizationId.toString() === organizationId.toString()
+      );
+      if (isMember) {
+        throw new Error('User is already a member of this organization');
+      }
     }
     
-    // Create user
-    const user = await User.create({
-      name,
+    // Check for existing pending invitation
+    const existingInvitation = await Invitation.findOne({
+      organizationId,
       email,
-      password,
-      role: "readOnly", // Default role
-      status: "pending", // Default status
+      status: 'pending'
     });
     
-    if (user) {
-      res.status(201).json({
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        status: user.status,
-        token: generateToken(user._id),
-      });
-    } else {
-      res.status(400).json({ message: "Invalid user data" });
+    if (existingInvitation) {
+      throw new Error('Invitation already sent to this email');
     }
-  } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
-
-// @desc    Get current user profile
-// @route   GET /api/auth/profile
-// @access  Private
-exports.getUserProfile = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id);
     
-    if (user) {
-      res.status(200).json({
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        status: user.status,
-        lastLogin: user.lastLoginFormatted,
-      });
-    } else {
-      res.status(404).json({ message: "User not found" });
+    // Create invitation
+    const token = crypto.randomBytes(32).toString('hex');
+    const invitation = new Invitation({
+      organizationId,
+      email,
+      role,
+      permissions,
+      invitedBy: inviterUserId,
+      token
+    });
+    
+    await invitation.save();
+    
+    // Log audit event
+    await this.logAudit(inviterUserId, organizationId, 'INVITATION_SENT', 'invitation', invitation._id, {
+      email,
+      role
+    });
+    
+    return invitation;
+  }
+  
+  // Accept Invitation
+  async acceptInvitation(token, userId) {
+    const invitation = await Invitation.findOne({
+      token,
+      status: 'pending',
+      expiresAt: { $gt: new Date() }
+    }).populate('organizationId');
+    
+    if (!invitation) {
+      throw new Error('Invalid or expired invitation');
     }
-  } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
-
-// @desc    Update user profile
-// @route   PUT /api/auth/profile
-// @access  Private
-exports.updateUserProfile = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id);
     
-    if (user) {
-      user.name = req.body.name || user.name;
-      user.email = req.body.email || user.email;
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+      const user = await User.findById(userId).session(session);
+      const organization = await Organization.findById(invitation.organizationId._id).session(session);
       
-      if (req.body.password) {
-        user.password = req.body.password;
+      // Add user to organization
+      await organization.addMember(userId, invitation.role, invitation.invitedBy, invitation.permissions);
+      
+      // Add organization to user
+      user.organizations.push({
+        organizationId: invitation.organizationId._id,
+        role: invitation.role,
+        permissions: invitation.permissions,
+        joinedAt: new Date(),
+        invitedBy: invitation.invitedBy,
+        status: 'active'
+      });
+      
+      await user.save({ session });
+      
+      // Update invitation status
+      invitation.status = 'accepted';
+      invitation.acceptedAt = new Date();
+      await invitation.save({ session });
+      
+      await session.commitTransaction();
+      
+      // Log audit event
+      await this.logAudit(userId, invitation.organizationId._id, 'INVITATION_ACCEPTED', 'invitation', invitation._id);
+      
+      return { user, organization };
+      
+    } catch (error) {
+      await session.abortTransaction();
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+  
+  // Add User Directly (Admin adds user)
+  async addUserDirectly(organizationId, adminUserId, userData, role, permissions = new Map()) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+      let user = await User.findOne({ email: userData.email }).session(session);
+      let isNewUser = false;
+      
+      if (!user) {
+        // Create new user
+        const tempPassword = crypto.randomBytes(8).toString('hex');
+        const hashedPassword = await bcrypt.hash(tempPassword, 12);
+        
+        user = new User({
+          email: userData.email,
+          firstName: userData.firstName,
+          lastName: userData.lastName,
+          passwordHash: hashedPassword,
+          emailVerified: false
+        });
+        
+        await user.save({ session });
+        isNewUser = true;
       }
       
-      const updatedUser = await user.save();
+      // Check if already a member
+      const isMember = user.organizations.some(org => 
+        org.organizationId.toString() === organizationId.toString()
+      );
       
-      res.status(200).json({
-        id: updatedUser._id,
-        name: updatedUser.name,
-        email: updatedUser.email,
-        role: updatedUser.role,
-        status: updatedUser.status,
-        token: generateToken(updatedUser._id),
+      if (isMember) {
+        throw new Error('User is already a member of this organization');
+      }
+      
+      const organization = await Organization.findById(organizationId).session(session);
+      
+      // Add to organization
+      await organization.addMember(user._id, role, adminUserId, permissions);
+      
+      // Add to user
+      user.organizations.push({
+        organizationId,
+        role,
+        permissions,
+        joinedAt: new Date(),
+        invitedBy: adminUserId,
+        status: 'active'
       });
-    } else {
-      res.status(404).json({ message: "User not found" });
+      
+      await user.save({ session });
+      
+      await session.commitTransaction();
+      
+      // Log audit event
+      await this.logAudit(adminUserId, organizationId, 'USER_ADDED_DIRECTLY', 'user', user._id, {
+        email: userData.email,
+        role,
+        isNewUser
+      });
+      
+      return { user, organization, isNewUser };
+      
+    } catch (error) {
+      await session.abortTransaction();
+      throw error;
+    } finally {
+      session.endSession();
     }
-  } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
   }
-};
-
-// routes/auth.js (Updated)
-const express = require("express");
-const router = express.Router();
-const { 
-  login, 
-  register, 
-  getUserProfile, 
-  updateUserProfile 
-} = require("../controllers/authController");
-const { protect } = require("../middleware/authMiddleware");
-
-// Auth routes
-router.post("/login", login);
-router.post("/register", register);
-router.get("/profile", protect, getUserProfile);
-router.put("/profile", protect, updateUserProfile);
-
-module.exports = router;
-
-// .env (example)
-PORT=3000
-MONGO_URI=mongodb://localhost:27017/user-management
-JWT_SECRET=your_jwt_secret_key
-NODE_ENV=development
-
-// server.js (Updated)
-const express = require("express");
-const dotenv = require("dotenv");
-const connectDB = require("./config/db");
-const cors = require("cors");
-
-dotenv.config();
-const app = express();
-app.use(express.json());
-
-app.use(cors());
-
-// Connection to database
-connectDB();
-
-// Import routes
-const authRoutes = require("./routes/auth");
-const userRoutes = require("./routes/userRoutes");
-const testRoutes = require("./routes/test");
-
-// Use routes
-app.use("/api/auth", authRoutes);
-app.use("/api/users", userRoutes);
-app.use("/api/test", testRoutes);
-
-// Error handler middleware
-app.use((err, req, res, next) => {
-  const statusCode = res.statusCode === 200 ? 500 : res.statusCode;
-  res.status(statusCode);
-  res.json({
-    message: err.message,
-    stack: process.env.NODE_ENV === "production" ? null : err.stack,
-  });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
-
-// config/db.js
-const mongoose = require("mongoose");
-
-const connectDB = async () => {
-  try {
-    const conn = await mongoose.connect(process.env.MONGO_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
+  
+  // Update User Role
+  async updateUserRole(organizationId, adminUserId, targetUserId, newRole, permissions) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+      const user = await User.findById(targetUserId).session(session);
+      const organization = await Organization.findById(organizationId).session(session);
+      
+      // Update in organization
+      await organization.updateMemberRole(targetUserId, newRole, permissions);
+      
+      // Update in user
+      const userOrg = user.organizations.find(org => 
+        org.organizationId.toString() === organizationId.toString()
+      );
+      
+      if (userOrg) {
+        userOrg.role = newRole;
+        if (permissions) userOrg.permissions = permissions;
+        await user.save({ session });
+      }
+      
+      await session.commitTransaction();
+      
+      // Log audit event
+      await this.logAudit(adminUserId, organizationId, 'USER_ROLE_UPDATED', 'user', targetUserId, {
+        newRole,
+        permissions: Object.fromEntries(permissions || new Map())
+      });
+      
+      return { user, organization };
+      
+    } catch (error) {
+      await session.abortTransaction();
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+  
+  // Remove User from Organization
+  async removeUser(organizationId, adminUserId, targetUserId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+      const user = await User.findById(targetUserId).session(session);
+      const organization = await Organization.findById(organizationId).session(session);
+      
+      // Remove from organization
+      await organization.removeMember(targetUserId);
+      
+      // Remove from user
+      user.organizations = user.organizations.filter(org => 
+        org.organizationId.toString() !== organizationId.toString()
+      );
+      await user.save({ session });
+      
+      await session.commitTransaction();
+      
+      // Log audit event
+      await this.logAudit(adminUserId, organizationId, 'USER_REMOVED', 'user', targetUserId);
+      
+      return { user, organization };
+      
+    } catch (error) {
+      await session.abortTransaction();
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+  
+  // Get Organization Members
+  async getOrganizationMembers(organizationId, page = 1, limit = 20) {
+    const organization = await Organization.findById(organizationId)
+      .populate({
+        path: 'members.userId',
+        select: 'firstName lastName email emailVerified createdAt'
+      })
+      .populate({
+        path: 'members.invitedBy',
+        select: 'firstName lastName email'
+      });
+    
+    if (!organization) {
+      throw new Error('Organization not found');
+    }
+    
+    const startIndex = (page - 1) * limit;
+    const endIndex = startIndex + limit;
+    
+    const members = organization.members
+      .filter(member => member.status === 'active')
+      .slice(startIndex, endIndex);
+    
+    return {
+      members,
+      total: organization.members.filter(m => m.status === 'active').length,
+      page,
+      limit
+    };
+  }
+  
+  // Check User Permission
+  async checkPermission(userId, organizationId, permission) {
+    const user = await User.findById(userId);
+    if (!user) return false;
+    
+    return user.hasPermission(organizationId, permission);
+  }
+  
+  // Log Audit Event
+  async logAudit(userId, organizationId, action, resource, resourceId, details = {}) {
+    const auditLog = new AuditLog({
+      userId,
+      organizationId,
+      action,
+      resource,
+      resourceId,
+      details
     });
     
-    console.log(`MongoDB Connected: ${conn.connection.host}`);
-  } catch (error) {
-    console.error(`Error: ${error.message}`);
-    process.exit(1);
+    await auditLog.save();
   }
-};
+}
 
-module.exports = connectDB;
+module.exports = AuthService;

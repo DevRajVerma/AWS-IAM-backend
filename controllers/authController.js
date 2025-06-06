@@ -7,38 +7,36 @@ exports.signup = async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
-    const existingUser = await User.findOne({ email });
+    // Validate required fields
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: "All fields are required" });
+    }
+
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
 
     if (existingUser)
       return res.status(400).json({ message: "User already exists" });
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-
     const user = await User.create({
-      name,
-      email,
-      password: hashedPassword,
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      password, // Password will be hashed by the pre-save middleware
       role: "admin",
+      status: "active",
     });
 
-    if (user) {
+    const token = generateToken(user);
 
-      const token = generateToken(user);
-
-      res.status(201).json({
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        token: token,
-      });
-    } else {
-      res.status(400).json({ message: "Unable to register user" });
-    }
-
-    // const token = generateToken(user);
-    //ab user create hoga to usko ek jwt token de denge
+    res.status(201).json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+      token: token,
+    });
   } catch (error) {
+    console.error("Signup error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
@@ -46,16 +44,21 @@ exports.signup = async (req, res) => {
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await User.findOne({ email });
+    
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email and password are required" });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
 
     if (!user) return res.status(400).json({ message: "Invalid credentials" });
 
-    const isMatch = await bcrypt.compare(password, user.password);
+    const isMatch = await user.matchPassword(password);
     if (!isMatch)
-      return res.status(400).json({ message: "Password not Matching" });
+      return res.status(400).json({ message: "Invalid credentials" });
 
     const options = {
-      timeZone: "Asia/Kolkata", // or any relevant timezone
+      timeZone: "Asia/Kolkata",
       year: "numeric",
       month: "short",
       day: "2-digit",
@@ -69,14 +72,16 @@ exports.login = async (req, res) => {
     await user.save();
 
     res.status(200).json({
-      id: user._id,
+      _id: user._id,
       name: user.name,
       email: user.email,
       role: user.role,
-      LastLogin: user.lastLogin,
+      status: user.status,
+      lastLogin: user.lastLogin,
       token: generateToken(user),
     });
   } catch (error) {
+    console.error("Login error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
